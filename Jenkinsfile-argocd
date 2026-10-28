@@ -1,0 +1,116 @@
+
+pipeline {
+    agent any
+
+    tools {
+        maven 'maven_3.10.0'
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                echo 'Checkout Git repo'
+                git branch: 'main',
+                    url: 'https://github.com/Gurraiah123/mindcircuit17d.git'
+            }
+        }
+
+        stage('Build and Unit Test') {
+            steps {
+                sh 'mvn clean test'
+            }
+        }
+
+        stage('SonarQube Scan') {
+            steps {
+                withSonarQubeEnv('sonarqube') {
+                    sh '''
+                        mvn sonar:sonar \
+                        -Dsonar.token=sqa_60c70c23ff3ad4790d94c15282d8e5008749e0b3
+                    '''
+                }
+            }
+        }
+
+        stage('Quality Gate') {
+            steps {
+                timeout(time: 5, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
+            }
+        }
+
+        stage('Build Artifact') {
+            steps {
+                echo 'Build Artifact'
+                sh 'mvn clean package'
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                echo 'Build Docker Image'
+
+                sh '''
+                    docker build -t guru0114/guru:${BUILD_NUMBER} -f Dockerfile .
+                '''
+            }
+        }
+
+        stage('Scan Docker Image using Trivy') {
+            steps {
+                echo 'Scanning Image'
+
+                sh '''
+                    trivy image --severity HIGH,CRITICAL --exit-code 1 guru0114/guru:${BUILD_NUMBER}
+                '''
+            }
+        }
+
+        stage('Push to Docker Hub') {
+            steps {
+                script {
+                    withCredentials([string(credentialsId: 'dockerhub', variable: 'dockerhub')]) {
+
+                        sh '''
+                            docker login -u guru0114 -p ${dockerhub}
+                        '''
+
+                        sh '''
+                            docker push guru0114/guru:${BUILD_NUMBER}
+                        '''
+                    }
+
+                    echo 'Pushed to Docker Hub'
+                }
+            }
+        }
+
+        stage('Update Deployment File') {
+            environment {
+                GIT_REPO_NAME = "mindcircuit17d"
+                GIT_USER_NAME = "Gurraiah123"
+            }
+
+            steps {
+                echo 'Update Deployment File'
+
+                withCredentials([string(credentialsId: 'githubtoken', variable: 'githubtoken')]) {
+
+                    sh '''
+                        git config user.email "guru167677@gmail.com"
+                        git config user.name "Gurraiah123"
+
+                        sed -i "s/guru:.*/guru:${BUILD_NUMBER}/g" deploymentfiles/deploy.yaml
+
+                        git add .
+                        git commit -m "Update deployment image to version ${BUILD_NUMBER}" || true
+
+                        git push https://${githubtoken}@github.com/${GIT_USER_NAME}/${GIT_REPO_NAME}.git HEAD:main
+                    '''
+                }
+            }
+        }
+    }
+}
